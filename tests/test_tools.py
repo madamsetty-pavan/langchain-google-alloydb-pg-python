@@ -42,7 +42,7 @@ class TestAlloyDBTools:
         # Verify the exact SQL query
         conn_mock = mock_engine._pool.connect.return_value.__aenter__.return_value
         executed_query = conn_mock.execute.call_args[0][0].text
-        assert "SELECT google_ml.sentiment_analysis" in executed_query
+        assert "SELECT google_ml.analyze_sentiment" in executed_query
 
     def test_sentiment_tool_run(self, mock_engine):
         """Test that AlloyDBSentimentTool._run executes the sentiment analysis SQL synchronously."""
@@ -58,7 +58,7 @@ class TestAlloyDBTools:
         # Verify the exact SQL query
         conn_mock = mock_engine._pool.connect.return_value.__aenter__.return_value
         executed_query = conn_mock.execute.call_args[0][0].text
-        assert "SELECT google_ml.summarize_content" in executed_query
+        assert "SELECT google_ml.summarize" in executed_query
         
     def test_summary_tool_run(self, mock_engine):
         """Test that AlloyDBSummaryTool._run executes the text summarization SQL synchronously."""

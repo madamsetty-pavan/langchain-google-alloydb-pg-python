@@ -64,7 +64,7 @@ class AlloyDBDocumentCompressor(BaseDocumentCompressor):
         # with an index or id mapping back to the input array.
         # We query the function and rely on the order it returns to sort the documents.
         query_text = """
-            SELECT * FROM google_ml.rank(:model_id, :query, :documents, :top_n)
+            SELECT * FROM google_ml.rank(CAST(:model_id AS varchar), CAST(:query AS text), CAST(:documents AS text[]), CAST(:top_n AS integer))
         """
         
         async with self.engine._pool.connect() as conn:
