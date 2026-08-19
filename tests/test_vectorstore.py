@@ -18,6 +18,7 @@ import os
 import uuid
 from threading import Thread
 from typing import Sequence
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -30,6 +31,10 @@ from sqlalchemy.engine.row import RowMapping
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from langchain_google_alloydb_pg import AlloyDBEngine, AlloyDBVectorStore, Column
+from langchain_google_alloydb_pg.indexes import (
+    DistanceStrategy,
+    ScaNNIndex,
+)
 
 DEFAULT_TABLE = "test_table" + str(uuid.uuid4())
 DEFAULT_TABLE_SYNC = "test_table_sync" + str(uuid.uuid4())
@@ -39,7 +44,7 @@ IMAGE_TABLE_SYNC = "image_sync" + str(uuid.uuid4())
 VECTOR_SIZE = 768
 
 embeddings_service = DeterministicFakeEmbedding(size=VECTOR_SIZE)
-host = os.environ["IP_ADDRESS"]
+host = os.environ.get("IP_ADDRESS", "127.0.0.1")
 
 texts = ["foo", "bar", "baz"]
 metadatas = [{"page": str(i), "source": "google.com"} for i in range(len(texts))]
@@ -121,13 +126,20 @@ class TestVectorStore:
 
     @pytest_asyncio.fixture(scope="class")
     async def engine(self, db_project, db_region, db_cluster, db_instance, db_name):
-        engine = await AlloyDBEngine.afrom_instance(
-            project_id=db_project,
-            cluster=db_cluster,
-            instance=db_instance,
-            region=db_region,
-            database=db_name,
-        )
+        host = os.environ.get("OMNI_HOST") or os.environ.get("IP_ADDRESS")
+        user = os.environ.get("OMNI_USER") or os.environ.get("DB_USER", "postgres")
+        password = os.environ.get("OMNI_PASSWORD") or os.environ.get("DB_PASSWORD")
+        if host and password:
+            connstring = f"postgresql+asyncpg://{user}:{password}@{host}:5432/{db_name}"
+            engine = AlloyDBEngine.from_connection_string(connstring)
+        else:
+            engine = await AlloyDBEngine.afrom_instance(
+                project_id=db_project,
+                cluster=db_cluster,
+                instance=db_instance,
+                region=db_region,
+                database=db_name,
+            )
 
         yield engine
         await aexecute(engine, f'DROP TABLE IF EXISTS "{DEFAULT_TABLE}"')
@@ -745,3 +757,275 @@ class TestVectorStore:
 
     def test_get_table_name(self, vs):
         assert vs.get_table_name() == DEFAULT_TABLE
+
+    def test_live_columnar_engine(self, vs):
+        """Test enabling columnar engine against live AlloyDB instance."""
+        vs.enable_columnar_engine(["content"])
+        vs.enable_columnar_engine()
+
+        # Assert functional similarity search still works on columnarized table
+        vs.add_texts(["Columnar engine test document"])
+        results = vs.similarity_search("Columnar test", k=1)
+        assert len(results) > 0
+        assert "Columnar" in results[0].page_content
+
+    def test_live_auto_columnarization(self, vs):
+        """Test triggering auto columnarization recommendations against live AlloyDB instance."""
+        try:
+            vs.enable_auto_columnarization()
+        except Exception as e:
+            if "google_columnar_engine.enabled" in str(
+                e
+            ) or "shared_preload_libraries" in str(e):
+                pytest.skip(f"Columnar engine flag not enabled on instance: {e}")
+            raise
+
+        # Assert functional similarity search still works after auto columnarization
+        vs.add_texts(["Auto columnarization test document"])
+        results = vs.similarity_search("Auto columnarization", k=1)
+        assert len(results) > 0
+        assert "Auto columnarization" in results[0].page_content
+
+    def test_live_vector_assist(self, engine):
+        """Test vector assist spec definition, application, and recommendations against live AlloyDB instance."""
+        table_name = "va_live_sync_table_" + str(uuid.uuid4()).replace("-", "_")
+        engine._run_as_sync(
+            aexecute(engine, f'DROP TABLE IF EXISTS "{table_name}" CASCADE;')
+        )
+        engine._run_as_sync(
+            aexecute(
+                engine,
+                f"""
+                CREATE TABLE "{table_name}" (
+                    langchain_id uuid PRIMARY KEY,
+                    content text,
+                    embedding vector({VECTOR_SIZE}),
+                    meta jsonb
+                );
+                """,
+            )
+        )
+        engine._run_as_sync(
+            aexecute(
+                engine,
+                f"""
+                INSERT INTO "{table_name}" (langchain_id, content, embedding, meta)
+                SELECT 
+                    gen_random_uuid(),
+                    'Content ' || i,
+                    (SELECT array_agg((random() * 2 - 1)::float4)::vector({VECTOR_SIZE}) FROM generate_series(1, {VECTOR_SIZE})),
+                    '{{"page": 1}}'::jsonb
+                FROM generate_series(1, 100) AS i;
+                """,
+            )
+        )
+        vs = AlloyDBVectorStore.create_sync(
+            engine,
+            embedding_service=embeddings_service,
+            table_name=table_name,
+            metadata_json_column="meta",
+        )
+        specs = vs.define_vector_assist_spec()
+        assert isinstance(specs, list)
+        assert len(specs) > 0
+        apply_res = vs.apply_vector_assist_spec()
+        assert isinstance(apply_res, list)
+        recs = vs.get_vector_assist_recommendations()
+        assert isinstance(recs, list)
+        engine._run_as_sync(
+            aexecute(engine, f'DROP TABLE IF EXISTS "{table_name}" CASCADE;')
+        )
+
+
+class TestVectorStoreUnit:
+    @pytest.fixture
+    def vs(self):
+        vs = AlloyDBVectorStore.__new__(AlloyDBVectorStore)
+        vs._engine = MagicMock()
+        mock_vs = MagicMock()
+        vs._PGVectorStore__vs = mock_vs
+        vs._AlloyDBVectorStore__vs = mock_vs
+
+        def mock_sync(coro):
+            if hasattr(coro, "close"):
+                coro.close()
+            return getattr(vs._engine._run_as_sync, "return_value", None)
+
+        async def mock_async(coro):
+            if hasattr(coro, "close"):
+                coro.close()
+            return getattr(vs._engine._run_as_async, "return_value", None)
+
+        vs._engine._run_as_sync = MagicMock(side_effect=mock_sync)
+        vs._engine._run_as_async = AsyncMock(side_effect=mock_async)
+        return vs
+
+    def test_enable_columnar_engine(self, vs):
+        """Test enabling the columnar engine triggers the appropriate sync method on the underlying store."""
+        # 1. Call sync facade with specific column
+        vs.enable_columnar_engine(["content"])
+        # 2. Assert delegation to underlying async implementation
+        vs._PGVectorStore__vs.aenable_columnar_engine.assert_called_once_with(
+            ["content"]
+        )
+
+    def test_enable_columnar_engine_without_columns(self, vs):
+        """Test enabling columnar engine without columns triggers default on underlying store."""
+        # 1. Call sync facade with default columns (None)
+        vs.enable_columnar_engine()
+        # 2. Assert delegation with None
+        vs._PGVectorStore__vs.aenable_columnar_engine.assert_called_once_with(None)
+
+    @pytest.mark.asyncio
+    async def test_aenable_columnar_engine(self, vs):
+        """Test enabling the columnar engine triggers the appropriate async method on the underlying store."""
+        # 1. Call async facade with specific column
+        await vs.aenable_columnar_engine(["content"])
+        # 2. Assert delegation to underlying async implementation
+        vs._PGVectorStore__vs.aenable_columnar_engine.assert_called_once_with(
+            ["content"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_aenable_columnar_engine_without_columns(self, vs):
+        """Test enabling columnar engine without columns asynchronously."""
+        # 1. Call async facade with default columns (None)
+        await vs.aenable_columnar_engine()
+        # 2. Assert delegation with None
+        vs._PGVectorStore__vs.aenable_columnar_engine.assert_called_once_with(None)
+
+    def test_enable_auto_columnarization(self, vs):
+        """Test enabling auto columnarization triggers the sync engine wrapper."""
+        # 1. Call sync facade
+        vs.enable_auto_columnarization()
+        # 2. Assert delegation
+        vs._PGVectorStore__vs.aenable_auto_columnarization.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_aenable_auto_columnarization(self, vs):
+        """Test enabling auto columnarization triggers the async engine wrapper."""
+        # 1. Call async facade
+        await vs.aenable_auto_columnarization()
+        # 2. Assert delegation
+        vs._PGVectorStore__vs.aenable_auto_columnarization.assert_called_once_with()
+
+    def test_define_vector_assist_spec(self, vs):
+        """Test definition of vector assist specification."""
+        # 1. Mock engine sync return value
+        expected = [{"spec": "ok"}]
+        vs._engine._run_as_sync.return_value = expected
+        # 2. Execute define_vector_assist_spec
+        res = vs.define_vector_assist_spec()
+        # 3. Assert return value and underlying call
+        assert res == expected
+        vs._PGVectorStore__vs.adefine_vector_assist_spec.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_adefine_vector_assist_spec(self, vs):
+        """Test definition of vector assist specification asynchronously."""
+        # 1. Mock engine async return value
+        expected = [{"spec": "ok"}]
+        vs._engine._run_as_async.return_value = expected
+        # 2. Execute adefine_vector_assist_spec
+        res = await vs.adefine_vector_assist_spec()
+        # 3. Assert return value and underlying call
+        assert res == expected
+        vs._PGVectorStore__vs.adefine_vector_assist_spec.assert_called_once_with()
+
+    def test_apply_vector_assist_spec(self, vs):
+        """Test applying vector assist specifications."""
+        # 1. Mock engine sync return value
+        expected = [{"apply": "ok"}]
+        vs._engine._run_as_sync.return_value = expected
+        # 2. Execute apply_vector_assist_spec
+        res = vs.apply_vector_assist_spec()
+        # 3. Assert return value and underlying call
+        assert res == expected
+        vs._PGVectorStore__vs.aapply_vector_assist_spec.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_aapply_vector_assist_spec(self, vs):
+        """Test applying vector assist specifications asynchronously."""
+        # 1. Mock engine async return value
+        expected = [{"apply": "ok"}]
+        vs._engine._run_as_async.return_value = expected
+        # 2. Execute aapply_vector_assist_spec
+        res = await vs.aapply_vector_assist_spec()
+        # 3. Assert return value and underlying call
+        assert res == expected
+        vs._PGVectorStore__vs.aapply_vector_assist_spec.assert_called_once_with()
+
+    def test_get_vector_assist_recommendations(self, vs):
+        """Test retrieving vector assist recommendations."""
+        # 1. Mock engine sync return value
+        expected = [{"rec": "ok"}]
+        vs._engine._run_as_sync.return_value = expected
+        # 2. Execute get_vector_assist_recommendations
+        res = vs.get_vector_assist_recommendations()
+        # 3. Assert return value and underlying call
+        assert res == expected
+        vs._PGVectorStore__vs.aget_vector_assist_recommendations.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_aget_vector_assist_recommendations(self, vs):
+        """Test retrieving vector assist recommendations asynchronously."""
+        # 1. Mock engine async return value
+        expected = [{"rec": "ok"}]
+        vs._engine._run_as_async.return_value = expected
+        # 2. Execute aget_vector_assist_recommendations
+        res = await vs.aget_vector_assist_recommendations()
+        # 3. Assert return value and underlying call
+        assert res == expected
+        vs._PGVectorStore__vs.aget_vector_assist_recommendations.assert_called_once_with()
+
+    def test_initialize_auto_vector_embeddings(self, vs):
+        """Test initializing auto vector embeddings with default arguments."""
+        # 1. Execute initialize_auto_vector_embeddings
+        vs.initialize_auto_vector_embeddings(
+            model_id="test-model",
+        )
+        # 2. Assert delegation to underlying async method
+        vs._PGVectorStore__vs.ainitialize_auto_vector_embeddings.assert_called_once_with(
+            "test-model", None, None, None
+        )
+
+    def test_initialize_auto_vector_embeddings_with_columns(self, vs):
+        """Test initializing auto vector embeddings with custom columns."""
+        # 1. Execute initialize_auto_vector_embeddings with custom column parameters
+        vs.initialize_auto_vector_embeddings(
+            model_id="test-model",
+            content_column="custom_content",
+            embedding_column="custom_embedding",
+            schema_name="myschema",
+        )
+        # 2. Assert custom parameters passed to underlying async method
+        vs._PGVectorStore__vs.ainitialize_auto_vector_embeddings.assert_called_once_with(
+            "test-model", "custom_content", "custom_embedding", "myschema"
+        )
+
+    @pytest.mark.asyncio
+    async def test_ainitialize_auto_vector_embeddings(self, vs):
+        """Test initializing auto vector embeddings asynchronously."""
+        # 1. Execute ainitialize_auto_vector_embeddings asynchronously
+        await vs.ainitialize_auto_vector_embeddings(
+            model_id="test-model",
+        )
+        # 2. Assert delegation
+        vs._PGVectorStore__vs.ainitialize_auto_vector_embeddings.assert_called_once_with(
+            "test-model", None, None, None
+        )
+
+    @pytest.mark.asyncio
+    async def test_ainitialize_auto_vector_embeddings_with_columns(self, vs):
+        """Test initializing auto vector embeddings with custom columns asynchronously."""
+        # 1. Execute ainitialize_auto_vector_embeddings with custom parameters
+        await vs.ainitialize_auto_vector_embeddings(
+            model_id="test-model",
+            content_column="custom_content",
+            embedding_column="custom_embedding",
+            schema_name="myschema",
+        )
+        # 2. Assert custom parameters passed to underlying async method
+        vs._PGVectorStore__vs.ainitialize_auto_vector_embeddings.assert_called_once_with(
+            "test-model", "custom_content", "custom_embedding", "myschema"
+        )
