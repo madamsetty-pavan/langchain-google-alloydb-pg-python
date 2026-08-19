@@ -267,15 +267,14 @@ class AlloyDBVectorStore(PGVectorStore):
         self, num_leaves: Optional[int], vector_size: int
     ) -> None:
         """Set database maintenance work memory (for ScaNN index creation)."""
-        await self._engine._run_as_async(
-            self._PGVectorStore__vs.aset_maintenance_work_mem(num_leaves, vector_size)  # type: ignore
-        )
+        await self._PGVectorStore__vs.aset_maintenance_work_mem(num_leaves, vector_size)  # type: ignore
 
     def set_maintenance_work_mem(
         self, num_leaves: Optional[int], vector_size: int
     ) -> None:
         """Set database maintenance work memory (for ScaNN index creation)."""
         self._engine._run_as_sync(
+            self._PGVectorStore__vs.aset_maintenance_work_mem(num_leaves, vector_size)  # type: ignore
         )
 
     async def aenable_columnar_engine(
