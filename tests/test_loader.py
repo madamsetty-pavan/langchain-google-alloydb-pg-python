@@ -28,11 +28,11 @@ from langchain_google_alloydb_pg import (
     Column,
 )
 
-project_id = os.environ["PROJECT_ID"]
-region = os.environ["REGION"]
-cluster_id = os.environ["CLUSTER_ID"]
-instance_id = os.environ["INSTANCE_ID"]
-db_name = os.environ["DATABASE_ID"]
+project_id = os.environ.get("PROJECT_ID", "")
+region = os.environ.get("REGION", "")
+cluster_id = os.environ.get("CLUSTER_ID", "")
+instance_id = os.environ.get("INSTANCE_ID", "")
+db_name = os.environ.get("DATABASE_ID", "")
 table_name = "test-table" + str(uuid.uuid4())
 
 

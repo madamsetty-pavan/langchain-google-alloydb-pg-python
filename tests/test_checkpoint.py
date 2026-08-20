@@ -34,11 +34,11 @@ from langchain_google_alloydb_pg.engine import AlloyDBEngine
 write_config: RunnableConfig = {"configurable": {"thread_id": "1", "checkpoint_ns": ""}}
 read_config: RunnableConfig = {"configurable": {"thread_id": "1"}}
 
-project_id = os.environ["PROJECT_ID"]
-region = os.environ["REGION"]
-cluster_id = os.environ["CLUSTER_ID"]
-instance_id = os.environ["INSTANCE_ID"]
-db_name = os.environ["DATABASE_ID"]
+project_id = os.environ.get("PROJECT_ID", "")
+region = os.environ.get("REGION", "")
+cluster_id = os.environ.get("CLUSTER_ID", "")
+instance_id = os.environ.get("INSTANCE_ID", "")
+db_name = os.environ.get("DATABASE_ID", "")
 table_name = "checkpoint" + str(uuid.uuid4())
 table_name_writes = table_name + "_writes"
 table_name_async = "checkpoint" + str(uuid.uuid4())

@@ -26,11 +26,11 @@ from langchain_google_alloydb_pg.async_chat_message_history import (
     AsyncAlloyDBChatMessageHistory,
 )
 
-project_id = os.environ["PROJECT_ID"]
-region = os.environ["REGION"]
-cluster_id = os.environ["CLUSTER_ID"]
-instance_id = os.environ["INSTANCE_ID"]
-db_name = os.environ["DATABASE_ID"]
+project_id = os.environ.get("PROJECT_ID", "")
+region = os.environ.get("REGION", "")
+cluster_id = os.environ.get("CLUSTER_ID", "")
+instance_id = os.environ.get("INSTANCE_ID", "")
+db_name = os.environ.get("DATABASE_ID", "")
 table_name = "message_store" + str(uuid.uuid4())
 table_name_async = "message_store" + str(uuid.uuid4())
 

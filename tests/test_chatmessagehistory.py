@@ -24,15 +24,15 @@ from sqlalchemy import text
 
 from langchain_google_alloydb_pg import AlloyDBChatMessageHistory, AlloyDBEngine
 
-project_id = os.environ["PROJECT_ID"]
-region = os.environ["REGION"]
-cluster_id = os.environ["CLUSTER_ID"]
-instance_id = os.environ["INSTANCE_ID"]
-db_name = os.environ["DATABASE_ID"]
+project_id = os.environ.get("PROJECT_ID", "")
+region = os.environ.get("REGION", "")
+cluster_id = os.environ.get("CLUSTER_ID", "")
+instance_id = os.environ.get("INSTANCE_ID", "")
+db_name = os.environ.get("DATABASE_ID", "")
 table_name = "message_store" + str(uuid.uuid4())
 table_name_async = "message_store" + str(uuid.uuid4())
-user = os.environ["DB_USER"]
-password = os.environ["DB_PASSWORD"]
+user = os.environ.get("DB_USER", "")
+password = os.environ.get("DB_PASSWORD", "")
 
 
 def get_env_var(key: str, desc: str) -> str:
